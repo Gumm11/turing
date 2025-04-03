@@ -23,6 +23,23 @@ const TURN_TIME_LIMIT = 900000;  // 15 minutes in milliseconds
 const roomTimers = new Map(); // Store room timers
 const turnTimers = new Map(); // Store turn timers
 
+// Add this at the top with other constants
+const AI_RESPONSES = [
+  "That's an interesting point!",
+  "I see what you mean.",
+  "Could you elaborate on that?",
+  "I'm not sure I understand completely.",
+  "That's a good question!",
+  "Let me think about that...",
+  "I have a different perspective on this.",
+  "That's a fascinating observation.",
+  "I agree with you on that.",
+  "I'm not sure I agree with that point."
+];
+
+// Add this to track AI typing states
+const aiTypingStates = new Map();
+
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
   
@@ -38,68 +55,60 @@ io.on('connection', (socket) => {
   });
 
   socket.on('SEND_MESSAGE', async (data) => {
-    console.log(`Client ${socket.id} sending message:`, data);
     if (socket.roomId && rooms.has(socket.roomId)) {
       const room = rooms.get(socket.roomId);
-      const sender = room.players.find(p => p === socket.id);
-      const otherPlayer = room.players.find(p => p !== socket.id);
-      
-      if (sender && otherPlayer) {
-        try {
-          // Determine if sender is player1 (true) or player2 (false)
-          const isPlayer1 = room.players[0] === socket.id;
-          
-          // Save message to database with sender_id and correct role
-          await dbService.createMessage(
-            socket.roomId,
-            isPlayer1, // true for player1, false for player2
-            data.text,
-            socket.id
-          );
+      if (!room.isActive) return;
 
-          // Create the message object
-          const message = {
-            text: data.text,
-            timestamp: new Date().toISOString()
-          };
-          
-          // Add message to room history
-          room.messages.push(message);
-          
-          console.log(`Sending message to sender ${socket.id}`);
-          // Send to sender (blue bubble)
-          socket.emit('RECEIVE_MESSAGE', {
-            ...message,
-            isUser: true
-          });
-          
-          console.log(`Sending message to receiver ${otherPlayer}`);
-          // Send to receiver (gray bubble)
+      const message = {
+        text: data.text,
+        timestamp: new Date().toISOString()
+      };
+
+      // Add message to room history
+      room.messages.push(message);
+
+      // Save message to database
+      try {
+        await dbService.createMessage(
+          socket.roomId,
+          room.players[0] === socket.id, // isPlayer1
+          data.text,
+          socket.id
+        );
+      } catch (error) {
+        console.error('Error saving message:', error);
+        socket.emit('ERROR', { message: 'Failed to save message' });
+        return;
+      }
+
+      // Send message to sender (blue bubble)
+      socket.emit('RECEIVE_MESSAGE', {
+        ...message,
+        isUser: true
+      });
+
+      // If this is a room with AI, handle AI response
+      if (room.players.length === 1) {
+        handleAIResponse(socket.roomId, socket.id);
+      } else {
+        // For human vs human, send to other player
+        const otherPlayer = room.players.find(p => p !== socket.id);
+        if (otherPlayer) {
           io.to(otherPlayer).emit('RECEIVE_MESSAGE', {
             ...message,
-            isUser: false
+            isUser: false // This ensures the message appears as a gray bubble
           });
 
-          console.log(`Notifying ${otherPlayer} that it's their turn`);
-          // Notify receiver that it's their turn
-          io.to(otherPlayer).emit('YOUR_TURN', { 
+          // Notify other player it's their turn
+          io.to(otherPlayer).emit('YOUR_TURN', {
             canSendMessage: true,
             timeLeft: TURN_TIME_LIMIT
           });
 
-          // Start turn timer for receiver
+          // Start turn timer for other player
           startTurnCountdown(socket.roomId, otherPlayer);
-        } catch (error) {
-          console.error('Error saving message:', error);
-          socket.emit('ERROR', { message: 'Failed to send message' });
         }
-      } else {
-        console.error('Invalid sender or receiver:', { sender, otherPlayer });
-        socket.emit('ERROR', { message: 'Invalid sender or receiver' });
       }
-    } else {
-      console.error('Invalid room:', socket.roomId);
-      socket.emit('ERROR', { message: 'Invalid room' });
     }
   });
 
@@ -135,30 +144,32 @@ io.on('connection', (socket) => {
           (data.isAI === result.player2_is_ai) : 
           (data.isAI === result.player1_is_ai);
         
+        const actualType = socket.id === result.player1_id ? 
+          (result.player2_is_ai ? 'AI' : 'Human') : 
+          (result.player1_is_ai ? 'AI' : 'Human');
+
         console.log(`Sending guess result to ${socket.id}:`, {
           isCorrect,
           opponentGuess: data.isAI,
-          actualType: socket.id === result.player1_id ? 
-            (result.player2_is_ai ? 'AI' : 'Human') : 
-            (result.player1_is_ai ? 'AI' : 'Human')
+          actualType
         });
 
         // Send the result to the player who made the guess
         socket.emit('GUESS_RESULT', {
           isCorrect,
           opponentGuess: data.isAI,
-          actualType: socket.id === result.player1_id ? 
-            (result.player2_is_ai ? 'AI' : 'Human') : 
-            (result.player1_is_ai ? 'AI' : 'Human')
+          actualType,
+          message: `Your guess was ${isCorrect ? 'correct' : 'incorrect'}! Your opponent was actually ${actualType}.`
         });
 
-        // If there's another player, notify them that the game is over
-        const otherPlayer = room.players.find(p => p !== socket.id);
-        if (otherPlayer) {
-          console.log(`Notifying ${otherPlayer} that game is over`);
-          io.to(otherPlayer).emit('GAME_OVER', {
-            message: 'Your opponent has made their guess. The game is over.'
-          });
+        // If both players have made their guesses, remove the room
+        if (result.player1_guess !== null && result.player2_guess !== null) {
+          setTimeout(() => {
+            if (rooms.has(socket.roomId)) {
+              rooms.delete(socket.roomId);
+              console.log(`Room ${socket.roomId} removed after both players guessed`);
+            }
+          }, 5000);
         }
       } catch (error) {
         console.error('Error submitting guess:', error);
@@ -180,8 +191,8 @@ io.on('connection', (socket) => {
         console.log(`Notifying ${otherPlayer} that opponent retired`);
         // Notify other player that their opponent has retired
         io.to(otherPlayer).emit('OPPONENT_DISCONNECTED', { 
-          message: 'Your opponent has retired from the game.',
-          isAI: room.playerTypes.get(socket.id) // Send whether the retired player was an AI
+          message: 'Your opponent has retired from the game. You can now make your guess about your opponent.',
+          canGuess: true
         });
         
         // Stop the room timer since the other player gets a chance to guess
@@ -196,6 +207,12 @@ io.on('connection', (socket) => {
           canGuess: true
         });
       }
+      
+      // Notify the retiring player that they can't make a guess
+      socket.emit('GAME_OVER', {
+        message: 'You have retired from the game. You cannot make a guess.',
+        canGuess: false
+      });
       
       // Mark room as inactive
       room.isActive = false;
@@ -218,10 +235,16 @@ const handleMatchmaking = async (socket) => {
   try {
     console.log('Player joined matchmaking:', socket.id);
     
-    // Check if player is already in a room
-    if (socket.roomId && rooms.has(socket.roomId)) {
-      console.log(`Player ${socket.id} is already in room ${socket.roomId}`);
-      return;
+    // Check if player is already in a room and if that room is still active
+    if (socket.roomId) {
+      const room = rooms.get(socket.roomId);
+      if (room && room.isActive) {
+        console.log(`Player ${socket.id} is already in active room ${socket.roomId}`);
+        return;
+      } else {
+        // If room doesn't exist or is inactive, clear the roomId
+        socket.roomId = null;
+      }
     }
 
     // Check if player is already in waiting list
@@ -239,73 +262,109 @@ const handleMatchmaking = async (socket) => {
 
     console.log('Current waiting players:', waitingPlayers.size);
 
-    // If we have at least 2 players waiting, create a room
-    if (waitingPlayers.size >= 2) {
-      // Get only the first two players from the waiting list
-      const players = Array.from(waitingPlayers.values()).slice(0, 2);
+    // If player is assigned to AI, create room immediately
+    if (isAI) {
       const roomId = generateRoomId();
       
-      // Create conversation in database with player IDs
-      console.log('Creating conversation in database:', {
-        opponentType: players[1].isAI,
-        player1: players[0].socket.id,
-        player2: players[1].socket.id,
-        roomId
-      });
-
+      // Create conversation with AI
       const conversation = await dbService.createConversation(
         roomId,
-        players[0].socket.id,
-        players[1].socket.id,
-        players[0].isAI,
-        players[1].isAI
+        socket.id,
+        'AI_OPPONENT',
+        false, // player is human
+        true   // opponent is AI
       );
       
       if (!conversation || !conversation.conversation_id) {
-        throw new Error('Failed to create conversation in database');
+        throw new Error('Failed to create conversation with AI');
       }
 
-      console.log('Created conversation:', conversation);
-      
-      // Create room with just these two players
+      // Create room with player and AI
       rooms.set(roomId, {
-        players: players.map(p => p.socket.id),
+        players: [socket.id],
         messages: [],
-        isFirstTurn: Math.random() < 0.5, // Randomly decide who goes first
-        playerTypes: new Map(players.map(p => [p.socket.id, p.isAI])), // Store AI status for each player
-        isActive: true, // Track room status
-        startTime: Date.now(), // Track when room was created
-        currentTurn: null, // Track whose turn it is
-        turnTimer: null // Store turn timer reference
+        isFirstTurn: true,
+        playerTypes: new Map([[socket.id, false]]),
+        isActive: true,
+        startTime: Date.now(),
+        currentTurn: null,
+        turnTimer: null
       });
 
-      // Set room ID for just these two players and remove them from waiting list
-      players.forEach(player => {
-        player.socket.roomId = roomId;
-        waitingPlayers.delete(player.socket.id);
-      });
+      // Set room ID and remove from waiting list
+      socket.roomId = roomId;
+      waitingPlayers.delete(socket.id);
 
-      // Notify just these two players about the room
-      players.forEach((player, index) => {
-        player.socket.emit('MATCH_FOUND', {
-          roomId,
-          conversationId: conversation.conversation_id,
-          isAI: player.isAI,
-          isFirstTurn: index === 0 ? rooms.get(roomId).isFirstTurn : !rooms.get(roomId).isFirstTurn,
-          timeLeft: ROOM_TIME_LIMIT
-        });
+      // Notify player about the room with AI
+      socket.emit('MATCH_FOUND', {
+        roomId,
+        conversationId: conversation.conversation_id,
+        isAI: true,
+        isFirstTurn: true,
+        timeLeft: ROOM_TIME_LIMIT
       });
 
       // Start room timer
-      startRoomCountdown(roomId);
-
-      console.log(`Created room ${roomId} with conversation_id ${conversation.conversation_id}`);
-      console.log('Remaining players in waiting list:', waitingPlayers.size);
+      startRoomTimer(roomId);
     } else {
-      // If not enough players, notify the player they are waiting
-      socket.emit('WAITING_FOR_PLAYER', {
-        message: 'Waiting for another player to join...'
-      });
+      // If player is assigned to human opponent, check for other waiting players
+      if (waitingPlayers.size >= 2) {
+        // Get the first two players from the waiting list
+        const players = Array.from(waitingPlayers.values()).slice(0, 2);
+        
+        // Create a room for two human players
+        const roomId = generateRoomId();
+        
+        // Create conversation in database
+        const conversation = await dbService.createConversation(
+          roomId,
+          players[0].socket.id,
+          players[1].socket.id,
+          false, // player1 is human
+          false  // player2 is human
+        );
+        
+        if (!conversation || !conversation.conversation_id) {
+          throw new Error('Failed to create conversation in database');
+        }
+
+        // Create room with both players
+        rooms.set(roomId, {
+          players: players.map(p => p.socket.id),
+          messages: [],
+          isFirstTurn: Math.random() < 0.5,
+          playerTypes: new Map(players.map(p => [p.socket.id, false])),
+          isActive: true,
+          startTime: Date.now(),
+          currentTurn: null,
+          turnTimer: null
+        });
+
+        // Set room ID for both players and remove them from waiting list
+        players.forEach(player => {
+          player.socket.roomId = roomId;
+          waitingPlayers.delete(player.socket.id);
+        });
+
+        // Notify both players about the room
+        players.forEach((player, index) => {
+          player.socket.emit('MATCH_FOUND', {
+            roomId,
+            conversationId: conversation.conversation_id,
+            isAI: false,
+            isFirstTurn: index === 0 ? rooms.get(roomId).isFirstTurn : !rooms.get(roomId).isFirstTurn,
+            timeLeft: ROOM_TIME_LIMIT
+          });
+        });
+
+        // Start room timer
+        startRoomTimer(roomId);
+      } else {
+        // If not enough players, notify the player they are waiting
+        socket.emit('WAITING_FOR_PLAYER', {
+          message: 'Waiting for another player to join...'
+        });
+      }
     }
   } catch (error) {
     console.error('Error in handleMatchmaking:', error);
@@ -327,6 +386,11 @@ const handleDisconnect = (socket) => {
     if (roomTimers.has(socket.roomId)) {
       clearInterval(roomTimers.get(socket.roomId));
       roomTimers.delete(socket.roomId);
+    }
+    
+    // Clean up AI typing state
+    if (aiTypingStates.has(socket.roomId)) {
+      aiTypingStates.delete(socket.roomId);
     }
     
     if (otherPlayer) {
@@ -357,57 +421,81 @@ const handleDisconnect = (socket) => {
   console.log('Active rooms:', rooms.size);
 };
 
-const startRoomCountdown = (roomId) => {
+const startRoomTimer = (roomId) => {
   const room = rooms.get(roomId);
   if (!room) return;
 
   // Clear any existing timer
-  if (roomTimers.has(roomId)) {
-    clearInterval(roomTimers.get(roomId));
+  if (room.roomTimer) {
+    clearTimeout(room.roomTimer);
   }
 
+  // Set new room timer
+  room.roomTimer = setTimeout(() => {
+    if (rooms.has(roomId)) {
+      const room = rooms.get(roomId);
+      if (room.isActive) {
+        // Time's up for the conversation
+        room.isActive = false;
+        
+        // Notify all players in the room that conversation has ended
+        room.players.forEach(playerId => {
+          io.to(playerId).emit('CONVERSATION_ENDED', {
+            message: "The conversation time has ended. You can now make your guess about your opponent.",
+            canGuess: true
+          });
+        });
+
+        // Set a timer to remove the room after 15 minutes
+        setTimeout(() => {
+          if (rooms.has(roomId)) {
+            rooms.delete(roomId);
+            console.log(`Room ${roomId} removed after 15 minutes of inactivity`);
+          }
+        }, 15 * 60 * 1000); // 15 minutes in milliseconds
+      }
+    }
+  }, ROOM_TIME_LIMIT);
+
+  // Start countdown updates
   let timeLeft = ROOM_TIME_LIMIT / 1000; // Convert to seconds
-  const timer = setInterval(() => {
-    // Check if room is still active
+  const countdownInterval = setInterval(() => {
+    if (!rooms.has(roomId)) {
+      clearInterval(countdownInterval);
+      return;
+    }
+
+    const room = rooms.get(roomId);
     if (!room.isActive) {
-      clearInterval(timer);
-      roomTimers.delete(roomId);
+      clearInterval(countdownInterval);
       return;
     }
 
     timeLeft--;
-    
-    // Broadcast time update to all players in the room
     room.players.forEach(playerId => {
       io.to(playerId).emit('TIME_UPDATE', {
-        timeLeft,
-        isLowTime: timeLeft <= 30
+        timeLeft: timeLeft
       });
     });
 
     if (timeLeft <= 0) {
-      clearInterval(timer);
-      roomTimers.delete(roomId);
-      
-      // Time's up - notify all players
+      clearInterval(countdownInterval);
+      // Send final 0 seconds update
       room.players.forEach(playerId => {
-        io.to(playerId).emit('ROOM_TIME_UP', {
-          message: "Time's up! Make your guess about your opponent."
+        io.to(playerId).emit('TIME_UPDATE', {
+          timeLeft: 0
         });
       });
-
-      // Mark room as inactive
+      // Trigger conversation ended immediately
       room.isActive = false;
-      
-      // Remove room after cleanup
-      setTimeout(() => {
-        rooms.delete(roomId);
-        console.log(`Room ${roomId} removed after time up`);
-      }, 5000);
+      room.players.forEach(playerId => {
+        io.to(playerId).emit('CONVERSATION_ENDED', {
+          message: "The conversation time has ended. You can now make your guess about your opponent.",
+          canGuess: true
+        });
+      });
     }
   }, 1000);
-
-  roomTimers.set(roomId, timer);
 };
 
 const startTurnCountdown = (roomId, playerId) => {
@@ -468,6 +556,83 @@ const handleForfeit = (roomId, playerId) => {
 
 const generateRoomId = () => {
   return Math.random().toString(36).substring(7);
+};
+
+// Update the handleAIResponse function
+const handleAIResponse = async (roomId, playerId) => {
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  // Random delay before starting to type (0.5-2 seconds)
+  const startTypingDelay = Math.floor(Math.random() * 1500) + 500;
+  
+  setTimeout(() => {
+    if (!rooms.has(roomId)) return;
+    
+    // Show typing indicator
+    io.to(playerId).emit('OPPONENT_TYPING', { isTyping: true });
+    aiTypingStates.set(roomId, true);
+
+    // Random typing duration (2-5 seconds)
+    const typingDuration = Math.floor(Math.random() * 3000) + 2000;
+    
+    setTimeout(async () => {
+      if (!rooms.has(roomId)) return;
+
+      const room = rooms.get(roomId);
+      if (!room.isActive) return;
+
+      // Get a random response
+      const response = AI_RESPONSES[Math.floor(Math.random() * AI_RESPONSES.length)];
+      
+      // Create message object
+      const message = {
+        text: response,
+        timestamp: new Date().toISOString()
+      };
+
+      // Add message to room history
+      room.messages.push(message);
+
+      // Save message to database
+      try {
+        await dbService.createMessage(
+          roomId,
+          false, // isPlayer1 (AI is always player2)
+          response,
+          'AI_OPPONENT'
+        );
+      } catch (error) {
+        console.error('Error saving AI message:', error);
+      }
+
+      // Hide typing indicator
+      io.to(playerId).emit('OPPONENT_TYPING', { isTyping: false });
+      aiTypingStates.delete(roomId);
+
+      // Send message to player
+      io.to(playerId).emit('RECEIVE_MESSAGE', {
+        ...message,
+        isUser: false // This ensures the message appears as a gray bubble
+      });
+
+      // Random delay before allowing player to respond (0.5-1.5 seconds)
+      const responseDelay = Math.floor(Math.random() * 1000) + 500;
+      
+      setTimeout(() => {
+        if (!rooms.has(roomId)) return;
+        
+        // Notify player it's their turn
+        io.to(playerId).emit('YOUR_TURN', {
+          canSendMessage: true,
+          timeLeft: TURN_TIME_LIMIT
+        });
+
+        // Start turn timer for player
+        startTurnCountdown(roomId, playerId);
+      }, responseDelay);
+    }, typingDuration);
+  }, startTypingDelay);
 };
 
 const PORT = process.env.PORT || 8080;

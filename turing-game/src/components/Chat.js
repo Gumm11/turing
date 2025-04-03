@@ -310,6 +310,8 @@ function Chat() {
   const [guessResult, setGuessResult] = useState(null);
   const chatAreaRef = useRef(null);
   const [showRetireConfirm, setShowRetireConfirm] = useState(false);
+  const [popupTitle, setPopupTitle] = useState('');
+  const [popupMessage, setPopupMessage] = useState('');
 
   useEffect(() => {
     console.log('Chat component mounted with state:', { roomId, isAI, isFirstTurn });
@@ -371,37 +373,28 @@ function Chat() {
     const handleOpponentDisconnected = (data) => {
       console.log('Opponent disconnected:', data);
       setIsOpponentDisconnected(true);
-      setCanGuess(true);
+      setCanGuess(data.canGuess);
       setShowPopup(true);
+      setPopupTitle("Opponent Left");
+      setPopupMessage(data.message);
     };
 
     const handleGuessResult = (data) => {
       console.log('Received guess result:', data);
-      if (!data) {
-        console.error('No guess result data received');
-        return;
-      }
       setCanGuess(false);
       setCanSendMessage(false);
-      console.log('Setting guess result state:', {
-        isCorrect: data.isCorrect,
-        opponentGuess: data.opponentGuess,
-        actualType: data.actualType
-      });
-      setGuessResult({
-        isCorrect: data.isCorrect,
-        opponentGuess: data.opponentGuess,
-        actualType: data.actualType
-      });
-      console.log('Setting showPopup to true');
       setShowPopup(true);
+      setPopupTitle("Guess Result!");
+      setPopupMessage(data.message);
     };
 
     const handleGameOver = (data) => {
       console.log('Game over:', data);
-      setCanGuess(false);
       setCanSendMessage(false);
+      setCanGuess(data.canGuess);
       setShowPopup(true);
+      setPopupTitle("Game Over");
+      setPopupMessage(data.message);
     };
 
     const handleYourTurn = (data) => {
@@ -413,6 +406,15 @@ function Chat() {
     const handleTimeUpdate = (data) => {
       console.log('Received time update:', data);
       setTimeLeft(data.timeLeft);
+    };
+
+    const handleConversationEnded = (data) => {
+      console.log('Conversation ended:', data);
+      setCanSendMessage(false);
+      setCanGuess(true);
+      setShowPopup(true);
+      setPopupTitle("Conversation Ended");
+      setPopupMessage(data.message);
     };
 
     const handleTurnTimeUpdate = (data) => {
@@ -439,6 +441,7 @@ function Chat() {
     wsService.on('GUESS_RESULT', handleGuessResult);
     wsService.on('GAME_OVER', handleGameOver);
     wsService.on('TIME_UPDATE', handleTimeUpdate);
+    wsService.on('CONVERSATION_ENDED', handleConversationEnded);
     wsService.on('TURN_TIME_UPDATE', handleTurnTimeUpdate);
     wsService.on('TURN_TIME_UP', handleTurnTimeUp);
     wsService.on('OPPONENT_FORFEIT', handleOpponentForfeit);
@@ -453,6 +456,7 @@ function Chat() {
       wsService.off('GUESS_RESULT', handleGuessResult);
       wsService.off('GAME_OVER', handleGameOver);
       wsService.off('TIME_UPDATE', handleTimeUpdate);
+      wsService.off('CONVERSATION_ENDED', handleConversationEnded);
       wsService.off('TURN_TIME_UPDATE', handleTurnTimeUpdate);
       wsService.off('TURN_TIME_UP', handleTurnTimeUp);
       wsService.off('OPPONENT_FORFEIT', handleOpponentForfeit);
@@ -645,37 +649,19 @@ function Chat() {
         {showPopup && !showRetireConfirm && (
           <PopupOverlay>
             <PopupContent>
-              <PopupTitle>
-                {guessResult 
-                  ? "Guess Result!" 
-                  : isOpponentDisconnected 
-                    ? "Opponent Left!" 
-                    : "Game Ended"}
-              </PopupTitle>
+              <PopupTitle>{popupTitle}</PopupTitle>
               <p style={{ marginBottom: '1.2rem', fontSize: '1.1rem' }}>
-                {guessResult 
-                  ? `Your guess was ${guessResult.isCorrect ? 'correct' : 'incorrect'}! You guessed your opponent was ${guessResult.opponentGuess ? 'an AI' : 'a human'}, but they were actually ${guessResult.actualType}.`
-                  : isOpponentDisconnected 
-                    ? "Your opponent has left the game. Was your opponent an AI or a human?"
-                    : canGuess 
-                      ? "Was your opponent an AI or a human?"
-                      : "You've lost your chance to guess."}
+                {popupMessage}
               </p>
-              {canGuess && !guessResult && (
+              {canGuess && (
                 <ButtonGroup>
-                  <GuessButton isAI onClick={() => handleGuess(true)}>
-                    AI
-                  </GuessButton>
-                  <GuessButton isAI={false} onClick={() => handleGuess(false)}>
-                    Human
-                  </GuessButton>
+                  <GuessButton isAI onClick={() => handleGuess(false)}>Human</GuessButton>
+                  <GuessButton isAI={false} onClick={() => handleGuess(true)}>AI</GuessButton>
                 </ButtonGroup>
               )}
-              {(!canGuess || guessResult) && (
+              {!canGuess && (
                 <ButtonGroup>
-                  <PlayAgainButton onClick={handlePlayAgain}>
-                    Play Again
-                  </PlayAgainButton>
+                  <PlayAgainButton onClick={handlePlayAgain}>Play Again</PlayAgainButton>
                 </ButtonGroup>
               )}
             </PopupContent>
