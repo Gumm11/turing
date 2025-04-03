@@ -162,12 +162,12 @@ io.on('connection', (socket) => {
           message: `Your guess was ${isCorrect ? 'correct' : 'incorrect'}! Your opponent was actually ${actualType}.`
         });
 
-        // If both players have made their guesses, remove the room
-        if (result.player1_guess !== null && result.player2_guess !== null) {
+        // If this is a room with AI or both players have made their guesses, remove the room
+        if (room.players.length === 1 || (result.player1_guess !== null && result.player2_guess !== null)) {
           setTimeout(() => {
             if (rooms.has(socket.roomId)) {
               rooms.delete(socket.roomId);
-              console.log(`Room ${socket.roomId} removed after both players guessed`);
+              console.log(`Room ${socket.roomId} removed after guess`);
             }
           }, 5000);
         }
